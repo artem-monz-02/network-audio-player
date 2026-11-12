@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Network Audio Player
 
 A C++ network audio player with DSP processing and audio reliability testing
@@ -10,3 +11,6 @@ A C++ network audio player with DSP processing and audio reliability testing
 - Audio playback and WAV export
 - Automated reliability and audio quality tests
 
+=======
+# network-audio-player
+>>>>>>> e47e4163c7f5bf65c132ba14bab3bbf9b8ce5472
