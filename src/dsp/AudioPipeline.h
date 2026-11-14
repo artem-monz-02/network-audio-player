@@ -12,8 +12,8 @@
 
 class AudioPipeline {
 public:
-    explicit AudioPipeline(float gain)
-        : processor_(gain) {}
+    explicit AudioPipeline(float gain, float drive)
+    : processor_(gain, drive) {}
 
     bool play(const std::string& uri) {
         GError* error = nullptr;

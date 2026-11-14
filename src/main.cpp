@@ -4,6 +4,7 @@
 
 #include <iostream>
 #include <string>
+#include <cmath>
 
 int main(int argc, char* argv[])
 {
@@ -17,15 +18,26 @@ int main(int argc, char* argv[])
 
     std::string input = argv[1];
     float gain = 1.0f;
+    float drive = 0.0f;
 
-    if (argc >= 3) {
-        try {
+    try {
+        if (argc >= 3) {
             gain = std::stof(argv[2]);
         }
-        catch (...) {
-            std::cerr << "Invalid gain value.\n";
-            return 1;
+
+        if (argc >= 4) {
+            drive = std::stof(argv[3]);
         }
+    }
+    catch (...) {
+        std::cerr << "Invalid gain or drive value.\n";
+        return 1;
+    }
+
+    if (!std::isfinite(gain) || !std::isfinite(drive) ||
+        gain < 0.0f || drive < 0.0f) {
+        std::cerr << "Gain and drive must be finite, non-negative values.\n";
+        return 1;
     }
 
     std::string uri;
@@ -52,7 +64,7 @@ int main(int argc, char* argv[])
     std::cout << "Playing: " << input << "\n";
     std::cout << "Gain: " << gain << "\n";
 
-    AudioPipeline pipeline(gain);
+    AudioPipeline pipeline(gain, drive);
 
     if (!pipeline.play(uri)) {
         return 1;
