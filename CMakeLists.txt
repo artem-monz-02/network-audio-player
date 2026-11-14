@@ -31,3 +31,10 @@ add_test(
     NAME AudioProcessorTest
     COMMAND test_audio_processor
 )
+
+add_executable(test_saturation tests/test_saturation.cpp)
+
+add_test(
+    NAME SaturationTest
+    COMMAND test_saturation
+)
