@@ -15,3 +15,9 @@ add_executable(network_audio_player
 target_link_libraries(network_audio_player
     PRIVATE PkgConfig::GSTREAMER
 )
+
+enable_testing()
+
+add_executable(test_gain tests/test_gain.cpp)
+
+add_test(NAME GainTest COMMAND test_gain)
