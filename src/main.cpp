@@ -1,47 +1,84 @@
 
 #include <gst/gst.h>
 #include <iostream>
+#include <string>
 
 int main(int argc, char* argv[])
 {
     gst_init(&argc, &argv);
 
-    // Check if an audio file was provided
     if (argc < 2) {
-        std::cout << "Usage: " << argv[0] << " <audio-file>\n";
+        std::cout << "Usage: " << argv[0] << " <file-or-url>\n";
         return 1;
     }
 
-    // Convert the file path to a GStreamer URI
-    gchar* absolute_path = g_canonicalize_filename(argv[1], nullptr);
-    GError* error = nullptr;
-    gchar* uri = gst_filename_to_uri(absolute_path, &error);
-    g_free(absolute_path);
+    std::string input = argv[1];
+    gchar* uri = nullptr;
+
+    // Check whether the input is a URL
+    if (input.find("http://") == 0 ||
+        input.find("https://") == 0) {
+        uri = g_strdup(input.c_str());
+    }
+    else {
+        // Convert a local file path into a URI
+        gchar* path = g_canonicalize_filename(argv[1], nullptr);
+        uri = gst_filename_to_uri(path, nullptr);
+        g_free(path);
+    }
 
     if (uri == nullptr) {
-        std::cerr << "Invalid file path.\n";
-        g_clear_error(&error);
+        std::cerr << "Invalid file path or URL.\n";
         return 1;
     }
 
-    // Create an audio player
+    // Create the player
     GstElement* player = gst_element_factory_make("playbin", "player");
 
     if (player == nullptr) {
-        std::cerr << "Could not create audio player.\n";
+        std::cerr << "Could not create player.\n";
         g_free(uri);
         return 1;
     }
 
-    // Set the audio file
+    // Set the audio source
     g_object_set(player, "uri", uri, nullptr);
+
+// Use souphttpsrc explicitly for HTTP streaming
+if (input.find("http://") == 0 ||
+    input.find("https://") == 0) {
+
+    GstElement* source = gst_element_factory_make(
+        "souphttpsrc", "http-source"
+    );
+
+    if (source == nullptr) {
+        std::cerr << "Could not create HTTP source.\n";
+        g_free(uri);
+        gst_object_unref(player);
+        return 1;
+    }
+
+    g_object_set(player, "source", source, nullptr);
+    gst_object_unref(source);
+}
     g_free(uri);
 
     // Start playback
-    std::cout << "Playing: " << argv[1] << "\n";
-    gst_element_set_state(player, GST_STATE_PLAYING);
+    std::cout << "Playing: " << input << "\n";
 
-    // Wait until playback finishes or an error occurs
+    GstStateChangeReturn state = gst_element_set_state(
+        player, GST_STATE_PLAYING
+    );
+
+    if (state == GST_STATE_CHANGE_FAILURE) {
+        std::cerr << "Could not start playback.\n";
+        gst_element_set_state(player, GST_STATE_NULL);
+        gst_object_unref(player);
+        return 1;
+    }
+
+    // Wait for playback to finish or fail
     GstBus* bus = gst_element_get_bus(player);
 
     GstMessage* message = gst_bus_timed_pop_filtered(
@@ -54,23 +91,29 @@ int main(int argc, char* argv[])
 
     int result = 0;
 
-    // Check for playback errors
+    if (message == nullptr) {
+        std::cerr << "No playback message received.\n";
+        result = 1;
+    }
+    else if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_ERROR) {
+        GError* error = nullptr;
+        gchar* debug = nullptr;
+
+        gst_message_parse_error(message, &error, &debug);
+
+        std::cerr << "Playback error: "
+                  << (error ? error->message : "Unknown")
+                  << "\n";
+
+        g_clear_error(&error);
+        g_free(debug);
+        result = 1;
+    }
+    else {
+        std::cout << "Playback finished.\n";
+    }
+
     if (message != nullptr) {
-        if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_ERROR) {
-            GError* playback_error = nullptr;
-            gchar* debug = nullptr;
-
-            gst_message_parse_error(message, &playback_error, &debug);
-
-            std::cerr << "Playback error: "
-                      << (playback_error ? playback_error->message : "Unknown")
-                      << "\n";
-
-            g_clear_error(&playback_error);
-            g_free(debug);
-            result = 1;
-        }
-
         gst_message_unref(message);
     }
 
