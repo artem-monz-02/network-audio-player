@@ -38,3 +38,7 @@ add_test(
     NAME SaturationTest
     COMMAND test_saturation
 )
+
+add_executable(test_biquad tests/test_biquad.cpp)
+
+add_test(NAME BiquadTest COMMAND test_biquad)
