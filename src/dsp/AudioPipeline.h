@@ -2,11 +2,13 @@
 
 #include "AudioProcessor.h"
 
+#include <gst/gst.h>
 #include <gst/app/gstappsink.h>
 #include <gst/app/gstappsrc.h>
 #include <gst/audio/audio.h>
-#include <gst/gst.h>
 
+#include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -20,284 +22,527 @@ public:
     bool play(const std::string& uri) {
         GError* error = nullptr;
 
-        GstElement* decoder = gst_element_factory_make("uridecodebin", "decoder");
-        GstElement* converter = gst_element_factory_make("audioconvert", "converter");
-        GstElement* resampler = gst_element_factory_make("audioresample", "resampler");
-        GstElement* sink = gst_element_factory_make("appsink", "input-sink");
-        GstElement* output = gst_parse_launch(
-            "appsrc name=output-source is-live=false format=time "
-            "! audioconvert ! audioresample ! autoaudiosink", &error);
+        GstElement* input = gst_element_factory_make(
+            "uridecodebin", "decoder"
+        );
 
-        if (!decoder || !converter || !resampler || !sink || !output) {
+        GstElement* converter = gst_element_factory_make(
+            "audioconvert", "converter"
+        );
+
+        GstElement* resampler = gst_element_factory_make(
+            "audioresample", "resampler"
+        );
+
+        GstElement* sink = gst_element_factory_make(
+            "appsink", "input-sink"
+        );
+
+        const char* headless = std::getenv("NAP_HEADLESS");
+
+        const bool useHeadless =
+            headless != nullptr &&
+            std::string(headless) == "1";
+
+        const std::string audioSink = useHeadless
+            ? "fakesink sync=false"
+            : "autoaudiosink";
+
+        const std::string outputDescription =
+            "appsrc name=output-source is-live=false format=time "
+            "block=true max-bytes=1048576 "
+            "! audioconvert "
+            "! audioresample "
+            "! " + audioSink;
+
+        GstElement* output = gst_parse_launch(
+            outputDescription.c_str(), &error
+        );
+
+        if (!input || !converter || !resampler ||
+            !sink || !output) {
             std::cerr << "Could not create audio pipeline.\n";
+
             if (error) {
-                std::cerr << error->message << '\n';
+                std::cerr << error->message << "\n";
                 g_error_free(error);
             }
-            if (decoder) gst_object_unref(decoder);
+
+            if (input) gst_object_unref(input);
             if (converter) gst_object_unref(converter);
             if (resampler) gst_object_unref(resampler);
             if (sink) gst_object_unref(sink);
             if (output) gst_object_unref(output);
+
             return false;
         }
+
         if (error) {
             g_error_free(error);
+            error = nullptr;
         }
 
-        GstCaps* requested_caps = gst_caps_from_string(
-            "audio/x-raw,format=F32LE,layout=interleaved");
-        g_object_set(sink, "caps", requested_caps, "sync", FALSE,
-                     "max-buffers", 8u, nullptr);
-        gst_caps_unref(requested_caps);
-        g_object_set(decoder, "uri", uri.c_str(), nullptr);
+        GstCaps* requestedCaps = gst_caps_from_string(
+            "audio/x-raw,format=F32LE,layout=interleaved"
+        );
 
-        GstElement* input_pipeline = gst_pipeline_new("input-pipeline");
-        if (!input_pipeline) {
+        g_object_set(
+            sink,
+            "caps", requestedCaps,
+            "sync", FALSE,
+            "max-buffers", 8u,
+            "drop", FALSE,
+            nullptr
+        );
+
+        gst_caps_unref(requestedCaps);
+
+        g_object_set(input, "uri", uri.c_str(), nullptr);
+
+        GstElement* inputPipeline =
+            gst_pipeline_new("input-pipeline");
+
+        if (!inputPipeline) {
             std::cerr << "Could not create input pipeline.\n";
-            gst_object_unref(decoder);
+
+            gst_object_unref(input);
             gst_object_unref(converter);
             gst_object_unref(resampler);
             gst_object_unref(sink);
             gst_object_unref(output);
+
             return false;
         }
 
-        gst_bin_add_many(GST_BIN(input_pipeline), decoder, converter,
-                         resampler, sink, nullptr);
-        if (!gst_element_link_many(converter, resampler, sink, nullptr)) {
+        gst_bin_add_many(
+            GST_BIN(inputPipeline),
+            input,
+            converter,
+            resampler,
+            sink,
+            nullptr
+        );
+
+        if (!gst_element_link_many(
+                converter, resampler, sink, nullptr)) {
             std::cerr << "Could not link input pipeline.\n";
-            gst_object_unref(input_pipeline);
+
+            gst_object_unref(inputPipeline);
             gst_object_unref(output);
+
             return false;
         }
-        g_signal_connect(decoder, "pad-added", G_CALLBACK(onPadAdded), converter);
 
-        GstElement* source = gst_bin_get_by_name(GST_BIN(output), "output-source");
+        g_signal_connect(
+            input,
+            "pad-added",
+            G_CALLBACK(onPadAdded),
+            converter
+        );
+
+        GstElement* source = gst_bin_get_by_name(
+            GST_BIN(output), "output-source"
+        );
+
         if (!source) {
             std::cerr << "Could not find output source.\n";
-            gst_object_unref(input_pipeline);
+
+            gst_object_unref(inputPipeline);
             gst_object_unref(output);
+
             return false;
         }
-        // Limit the amount of decoded audio waiting to be played.
-        g_object_set(source, "block", TRUE, "max-bytes", static_cast<guint64>(1048576),
-                     nullptr);
 
-        if (gst_element_set_state(input_pipeline, GST_STATE_PLAYING)
-            == GST_STATE_CHANGE_FAILURE) {
+        if (gst_element_set_state(
+                inputPipeline, GST_STATE_PLAYING
+            ) == GST_STATE_CHANGE_FAILURE) {
             std::cerr << "Could not start input pipeline.\n";
-            cleanup(input_pipeline, output, source);
+
+            cleanup(inputPipeline, output, source);
             return false;
         }
 
         bool success = true;
-        bool output_started = false;
-        int configured_rate = 0;
-        int configured_channels = 0;
+        bool outputStarted = false;
+        bool formatConfigured = false;
+
+        int configuredRate = 0;
+        int configuredChannels = 0;
 
         while (true) {
             GstSample* sample = gst_app_sink_try_pull_sample(
-                GST_APP_SINK(sink), 100 * GST_MSECOND);
+                GST_APP_SINK(sink),
+                100 * GST_MSECOND
+            );
+
             if (!sample) {
-                if (checkBusError(input_pipeline) ||
-                    (output_started && checkBusError(output))) {
-                    success = false;
+                GstBus* bus =
+                    gst_element_get_bus(inputPipeline);
+
+                GstMessage* message = gst_bus_pop_filtered(
+                    bus,
+                    static_cast<GstMessageType>(
+                        GST_MESSAGE_ERROR |
+                        GST_MESSAGE_EOS
+                    )
+                );
+
+                if (message) {
+                    if (GST_MESSAGE_TYPE(message) ==
+                        GST_MESSAGE_ERROR) {
+                        printError(message);
+                        success = false;
+                    }
+
+                    gst_message_unref(message);
+                }
+
+                gst_object_unref(bus);
+
+                if (!success ||
+                    gst_app_sink_is_eos(GST_APP_SINK(sink))) {
                     break;
                 }
-                if (gst_app_sink_is_eos(GST_APP_SINK(sink))) break;
+
                 continue;
             }
 
-            GstCaps* caps = gst_sample_get_caps(sample);
-            GstAudioInfo info;
-            if (!caps || !gst_audio_info_from_caps(&info, caps)) {
-                std::cerr << "Failed to read audio format.\n";
-                gst_sample_unref(sample);
-                success = false;
-                break;
-            }
-
-            const int rate = GST_AUDIO_INFO_RATE(&info);
-            const int channels = GST_AUDIO_INFO_CHANNELS(&info);
-            if (rate <= 2000 || channels <= 0 ||
-                GST_AUDIO_INFO_FORMAT(&info) != GST_AUDIO_FORMAT_F32LE ||
-                GST_AUDIO_INFO_LAYOUT(&info) != GST_AUDIO_LAYOUT_INTERLEAVED) {
-                std::cerr << "Unsupported PCM audio format.\n";
-                gst_sample_unref(sample);
-                success = false;
-                break;
-            }
-
-            if (!output_started) {
-                try {
-                    processor_.configureAudio(static_cast<float>(rate), channels);
-                } catch (const std::exception& ex) {
-                    std::cerr << "DSP configuration failed: " << ex.what() << '\n';
-                    gst_sample_unref(sample);
-                    success = false;
-                    break;
-                }
-                configured_rate = rate;
-                configured_channels = channels;
-                g_object_set(source, "caps", caps, nullptr);
-                if (gst_element_set_state(output, GST_STATE_PLAYING)
-                    == GST_STATE_CHANGE_FAILURE) {
-                    std::cerr << "Could not start output pipeline.\n";
-                    gst_sample_unref(sample);
-                    success = false;
-                    break;
-                }
-                output_started = true;
-                std::cout << "Sample rate: " << rate << " Hz\n"
-                          << "Channels: " << channels << '\n';
-            } else if (rate != configured_rate || channels != configured_channels) {
-                // A format change requires synchronized DSP and appsrc renegotiation.
-                std::cerr << "Audio format changed during playback; unsupported.\n";
-                gst_sample_unref(sample);
-                success = false;
-                break;
-            }
-
             GstBuffer* buffer = gst_sample_get_buffer(sample);
-            GstMapInfo input_map;
-            if (!buffer || !gst_buffer_map(buffer, &input_map, GST_MAP_READ)) {
+            GstCaps* caps = gst_sample_get_caps(sample);
+
+            GstAudioInfo audioInfo;
+
+            if (!buffer || !caps ||
+                !gst_audio_info_from_caps(&audioInfo, caps)) {
+                std::cerr << "Failed to read audio format.\n";
+
+                gst_sample_unref(sample);
+                success = false;
+                break;
+            }
+
+            const int sampleRate =
+                GST_AUDIO_INFO_RATE(&audioInfo);
+
+            const int channels =
+                GST_AUDIO_INFO_CHANNELS(&audioInfo);
+
+            const GstAudioFormat format =
+                GST_AUDIO_INFO_FORMAT(&audioInfo);
+
+            if (sampleRate <= 2000 ||
+                channels <= 0 ||
+                format != GST_AUDIO_FORMAT_F32LE ||
+                GST_AUDIO_INFO_LAYOUT(&audioInfo) !=
+                    GST_AUDIO_LAYOUT_INTERLEAVED) {
+                std::cerr << "Unsupported audio configuration.\n";
+
+                gst_sample_unref(sample);
+                success = false;
+                break;
+            }
+
+            if (!formatConfigured) {
+                try {
+                    processor_.configureAudio(
+                        static_cast<float>(sampleRate),
+                        channels
+                    );
+                } catch (const std::exception& exception) {
+                    std::cerr << "DSP configuration failed: "
+                              << exception.what() << "\n";
+
+                    gst_sample_unref(sample);
+                    success = false;
+                    break;
+                }
+
+                configuredRate = sampleRate;
+                configuredChannels = channels;
+                formatConfigured = true;
+
+                std::cout << "Sample rate: "
+                          << sampleRate << " Hz\n";
+
+                std::cout << "Channels: "
+                          << channels << "\n";
+            } else if (sampleRate != configuredRate ||
+                       channels != configuredChannels) {
+                std::cerr
+                    << "Audio format changed during playback.\n";
+
+                gst_sample_unref(sample);
+                success = false;
+                break;
+            }
+
+            if (!outputStarted) {
+                g_object_set(
+                    source,
+                    "caps", caps,
+                    nullptr
+                );
+
+                if (gst_element_set_state(
+                        output, GST_STATE_PLAYING
+                    ) == GST_STATE_CHANGE_FAILURE) {
+                    std::cerr
+                        << "Could not start output pipeline.\n";
+
+                    gst_sample_unref(sample);
+                    success = false;
+                    break;
+                }
+
+                outputStarted = true;
+            }
+
+            GstMapInfo map;
+
+            if (!gst_buffer_map(buffer, &map, GST_MAP_READ)) {
                 std::cerr << "Could not map input buffer.\n";
+
                 gst_sample_unref(sample);
                 success = false;
                 break;
             }
 
-            const size_t frame_bytes = sizeof(float) * static_cast<size_t>(channels);
-            if (input_map.size % frame_bytes != 0 ||
-                input_map.size / sizeof(float) > static_cast<size_t>(std::numeric_limits<int>::max())) {
+            if (map.size % sizeof(float) != 0 ||
+                map.size % audioInfo.bpf != 0 ||
+                map.size / sizeof(float) >
+                    static_cast<gsize>(
+                        std::numeric_limits<int>::max()
+                    )) {
                 std::cerr << "Invalid PCM buffer size.\n";
-                gst_buffer_unmap(buffer, &input_map);
+
+                gst_buffer_unmap(buffer, &map);
                 gst_sample_unref(sample);
                 success = false;
                 break;
             }
 
-            GstBuffer* processed = gst_buffer_new_allocate(nullptr, input_map.size, nullptr);
-            GstMapInfo output_map;
-            if (!processed || !gst_buffer_map(processed, &output_map, GST_MAP_WRITE)) {
-                std::cerr << "Could not allocate or map output buffer.\n";
-                if (processed) gst_buffer_unref(processed);
-                gst_buffer_unmap(buffer, &input_map);
+            GstBuffer* processed = gst_buffer_new_allocate(
+                nullptr, map.size, nullptr
+            );
+
+            if (!processed) {
+                std::cerr << "Could not allocate audio buffer.\n";
+
+                gst_buffer_unmap(buffer, &map);
                 gst_sample_unref(sample);
                 success = false;
                 break;
             }
 
-            std::memcpy(output_map.data, input_map.data, input_map.size);
-            try {
-                processor_.process(reinterpret_cast<float*>(output_map.data),
-                                   static_cast<int>(input_map.size / sizeof(float)));
-            } catch (const std::exception& ex) {
-                std::cerr << "DSP processing failed: " << ex.what() << '\n';
-                gst_buffer_unmap(processed, &output_map);
+            GstMapInfo outputMap;
+
+            if (!gst_buffer_map(
+                    processed, &outputMap, GST_MAP_WRITE
+                )) {
+                std::cerr << "Could not map output buffer.\n";
+
                 gst_buffer_unref(processed);
-                gst_buffer_unmap(buffer, &input_map);
+                gst_buffer_unmap(buffer, &map);
                 gst_sample_unref(sample);
+
                 success = false;
                 break;
             }
-            gst_buffer_unmap(processed, &output_map);
-            GST_BUFFER_PTS(processed) = GST_BUFFER_PTS(buffer);
-            GST_BUFFER_DURATION(processed) = GST_BUFFER_DURATION(buffer);
-            GST_BUFFER_OFFSET(processed) = GST_BUFFER_OFFSET(buffer);
-            GST_BUFFER_OFFSET_END(processed) = GST_BUFFER_OFFSET_END(buffer);
-            gst_buffer_unmap(buffer, &input_map);
+
+            std::memcpy(
+                outputMap.data,
+                map.data,
+                map.size
+            );
+
+            float* samples =
+                reinterpret_cast<float*>(outputMap.data);
+
+            const int sampleCount =
+                static_cast<int>(
+                    outputMap.size / sizeof(float)
+                );
+
+            try {
+                processor_.process(samples, sampleCount);
+            } catch (const std::exception& exception) {
+                std::cerr << "DSP processing failed: "
+                          << exception.what() << "\n";
+
+                gst_buffer_unmap(processed, &outputMap);
+                gst_buffer_unref(processed);
+                gst_buffer_unmap(buffer, &map);
+                gst_sample_unref(sample);
+
+                success = false;
+                break;
+            }
+
+            gst_buffer_unmap(processed, &outputMap);
+
+            GST_BUFFER_PTS(processed) =
+                GST_BUFFER_PTS(buffer);
+
+            GST_BUFFER_DTS(processed) =
+                GST_BUFFER_DTS(buffer);
+
+            GST_BUFFER_DURATION(processed) =
+                GST_BUFFER_DURATION(buffer);
+
+            GST_BUFFER_OFFSET(processed) =
+                GST_BUFFER_OFFSET(buffer);
+
+            GST_BUFFER_OFFSET_END(processed) =
+                GST_BUFFER_OFFSET_END(buffer);
+
+            gst_buffer_unmap(buffer, &map);
+
+            GstFlowReturn result = gst_app_src_push_buffer(
+                GST_APP_SRC(source), processed
+            );
+
             gst_sample_unref(sample);
 
-            // push_buffer takes ownership of processed, including on failure.
-            if (gst_app_src_push_buffer(GST_APP_SRC(source), processed) != GST_FLOW_OK) {
-                std::cerr << "Could not push processed audio.\n";
+            if (result != GST_FLOW_OK) {
+                std::cerr
+                    << "Could not push processed audio.\n";
+
                 success = false;
                 break;
             }
         }
 
-        if (success && output_started) {
-            if (gst_app_src_end_of_stream(GST_APP_SRC(source)) != GST_FLOW_OK) {
-                std::cerr << "Could not signal end of stream.\n";
+        if (outputStarted && success) {
+            GstFlowReturn eosResult =
+                gst_app_src_end_of_stream(GST_APP_SRC(source));
+
+            if (eosResult != GST_FLOW_OK) {
+                std::cerr
+                    << "Could not signal end of stream.\n";
+
                 success = false;
-            } else {
+            }
+
+            if (success) {
                 GstBus* bus = gst_element_get_bus(output);
-                // Wait for actual playback completion, not a fixed 10-second limit.
+
                 GstMessage* message = gst_bus_timed_pop_filtered(
-                    bus, GST_CLOCK_TIME_NONE,
-                    static_cast<GstMessageType>(GST_MESSAGE_EOS | GST_MESSAGE_ERROR));
-                if (!message) {
-                    std::cerr << "Output playback ended without EOS.\n";
-                    success = false;
-                } else {
-                    if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_ERROR) {
+                    bus,
+                    10 * GST_SECOND,
+                    static_cast<GstMessageType>(
+                        GST_MESSAGE_EOS |
+                        GST_MESSAGE_ERROR
+                    )
+                );
+
+                if (message) {
+                    if (GST_MESSAGE_TYPE(message) ==
+                        GST_MESSAGE_ERROR) {
                         printError(message);
                         success = false;
                     }
+
                     gst_message_unref(message);
+                } else {
+                    std::cerr
+                        << "Timed out waiting for output playback.\n";
+
+                    success = false;
                 }
+
                 gst_object_unref(bus);
             }
-        } else if (!output_started) {
+        } else if (!outputStarted) {
             std::cerr << "No audio samples were decoded.\n";
             success = false;
         }
 
-        cleanup(input_pipeline, output, source);
+        cleanup(inputPipeline, output, source);
+
         return success;
     }
 
 private:
     AudioProcessor processor_;
 
-    static void onPadAdded(GstElement*, GstPad* pad, gpointer user_data) {
-        GstElement* converter = GST_ELEMENT(user_data);
-        GstPad* sink_pad = gst_element_get_static_pad(converter, "sink");
+    static void onPadAdded(
+        GstElement* decoder,
+        GstPad* pad,
+        gpointer userData
+    ) {
+        (void)decoder;
+
+        GstElement* converter =
+            GST_ELEMENT(userData);
+
+        GstPad* sinkPad =
+            gst_element_get_static_pad(converter, "sink");
+
+        if (!sinkPad) {
+            return;
+        }
+
         GstCaps* caps = gst_pad_get_current_caps(pad);
-        if (!caps) caps = gst_pad_query_caps(pad, nullptr);
+
+        if (!caps) {
+            caps = gst_pad_query_caps(pad, nullptr);
+        }
+
         if (caps && !gst_caps_is_empty(caps)) {
-            const GstStructure* structure = gst_caps_get_structure(caps, 0);
-            const char* name = gst_structure_get_name(structure);
+            const GstStructure* structure =
+                gst_caps_get_structure(caps, 0);
+
+            const char* name =
+                gst_structure_get_name(structure);
+
             if (g_str_has_prefix(name, "audio/x-raw") &&
-                !gst_pad_is_linked(sink_pad)) {
-                if (gst_pad_link(pad, sink_pad) != GST_PAD_LINK_OK) {
-                    std::cerr << "Could not link decoded audio pad.\n";
+                !gst_pad_is_linked(sinkPad)) {
+                GstPadLinkReturn result =
+                    gst_pad_link(pad, sinkPad);
+
+                if (result != GST_PAD_LINK_OK) {
+                    std::cerr
+                        << "Could not link decoded audio pad.\n";
                 }
             }
         }
-        if (caps) gst_caps_unref(caps);
-        gst_object_unref(sink_pad);
+
+        if (caps) {
+            gst_caps_unref(caps);
+        }
+
+        gst_object_unref(sinkPad);
     }
 
     static void printError(GstMessage* message) {
         GError* error = nullptr;
         gchar* debug = nullptr;
-        gst_message_parse_error(message, &error, &debug);
+
+        gst_message_parse_error(
+            message, &error, &debug
+        );
+
         std::cerr << "GStreamer error: "
-                  << (error ? error->message : "Unknown") << '\n';
-        if (debug) std::cerr << "Debug details: " << debug << '\n';
+                  << (error ? error->message : "Unknown")
+                  << "\n";
+
+        if (debug) {
+            std::cerr << "Debug details: "
+                      << debug << "\n";
+        }
+
         g_clear_error(&error);
         g_free(debug);
     }
 
-    static bool checkBusError(GstElement* pipeline) {
-        GstBus* bus = gst_element_get_bus(pipeline);
-        GstMessage* message = gst_bus_pop_filtered(bus, GST_MESSAGE_ERROR);
-        const bool failed = message != nullptr;
-        if (message) {
-            printError(message);
-            gst_message_unref(message);
-        }
-        gst_object_unref(bus);
-        return failed;
-    }
-
-    static void cleanup(GstElement* input, GstElement* output,
-                        GstElement* source) {
+    static void cleanup(
+        GstElement* input,
+        GstElement* output,
+        GstElement* source
+    ) {
         gst_element_set_state(input, GST_STATE_NULL);
         gst_element_set_state(output, GST_STATE_NULL);
+
         gst_object_unref(source);
         gst_object_unref(input);
         gst_object_unref(output);

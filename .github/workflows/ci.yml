@@ -1,0 +1,68 @@
+name: Network Audio Player CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            pkg-config \
+            python3 \
+            python3-pytest \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-libav
+
+      - name: Configure CMake
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build project
+        run: cmake --build build --parallel 2
+
+      - name: Run C++ unit tests
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Generate WAV test audio
+        run: |
+          gst-launch-1.0 -q \
+            audiotestsrc wave=sine num-buffers=100 \
+            ! audioconvert \
+            ! audioresample \
+            ! audio/x-raw,rate=48000,channels=2 \
+            ! wavenc \
+            ! filesink location=test-tone.wav
+
+      - name: Generate FLAC test audio
+        run: |
+          gst-launch-1.0 -q \
+            audiotestsrc wave=sine num-buffers=100 \
+            ! audioconvert \
+            ! audioresample \
+            ! audio/x-raw,rate=48000,channels=2 \
+            ! flacenc \
+            ! filesink location=test-tone.flac
+
+      - name: Run Python integration tests
+        env:
+          GST_DEBUG: "2"
+          NAP_HEADLESS: "1"
+        run: |
+          python3 -m pytest tests/integration -v
+        run: |
+          python3 -m pytest tests/integration -v
