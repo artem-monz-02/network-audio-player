@@ -5,3 +5,7 @@ cmake-build-*/
 *.a
 *.swp
 .vscode/
+build-coverage/
+coverage-report/
+coverage.info
+coverage-filtered.info

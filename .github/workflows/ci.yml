@@ -75,3 +75,58 @@ jobs:
           NAP_HEADLESS: "1"
         run: |
           python3 -m pytest tests/integration -v
+
+  coverage:
+    name: C++ Code Coverage
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            pkg-config \
+            lcov \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev
+
+      - name: Configure coverage build
+        run: |
+          cmake -S . -B build-coverage \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="--coverage -O0"
+
+      - name: Build with coverage
+        run: |
+          cmake --build build-coverage --parallel 2
+
+      - name: Run C++ unit tests
+        run: |
+          ctest --test-dir build-coverage --output-on-failure
+
+      - name: Generate coverage report
+        run: |
+          lcov --capture \
+            --directory build-coverage \
+            --output-file coverage.info
+
+          lcov --extract coverage.info \
+            '*/src/dsp/*' \
+            --output-file coverage-filtered.info
+
+          lcov --summary coverage-filtered.info
+
+          genhtml coverage-filtered.info \
+            --output-directory coverage-report
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpp-coverage-report
+          path: coverage-report/
+          retention-days: 30
