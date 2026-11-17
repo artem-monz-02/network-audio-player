@@ -9,6 +9,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(GSTREAMER REQUIRED IMPORTED_TARGET
     gstreamer-1.0
     gstreamer-app-1.0
+    gstreamer-audio-1.0
 )
 
 add_executable(network_audio_player
@@ -42,3 +43,6 @@ add_test(
 add_executable(test_biquad tests/test_biquad.cpp)
 
 add_test(NAME BiquadTest COMMAND test_biquad)
+
+add_executable(test_equalizer tests/test_equalizer.cpp)
+add_test(NAME EqualizerTest COMMAND test_equalizer)
